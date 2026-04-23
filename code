@@ -1,0 +1,230 @@
+!pip install opencv-python-headless joblib gradio matplotlib seaborn scikit-learn
+
+from google.colab import files
+uploaded = files.upload()
+
+import pandas as pd
+
+df = pd.read_csv(list(uploaded.keys())[0])
+df.head()
+
+X = df[['brightness', 'contrast', 'edge_density', 'face_count']]
+y = df['label']
+print("Features:", X.shape, "Target:", y.shape)
+
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+from sklearn.ensemble import RandomForestClassifier
+
+rf = RandomForestClassifier(n_estimators=200, random_state=42)
+rf.fit(X_train_scaled, y_train)
+
+y_pred = rf.predict(X_test_scaled)
+
+from sklearn.metrics import accuracy_score, classification_report, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print(classification_report(y_test, y_pred))
+
+ConfusionMatrixDisplay.from_estimator(rf, X_test_scaled, y_test)
+plt.show()
+
+import seaborn as sns
+
+importances = pd.Series(rf.feature_importances_, index=X.columns)
+
+sns.barplot(x=importances.values, y=importances.index)
+plt.title("Feature Importance")
+plt.show()
+
+import joblib
+
+joblib.dump(rf, "rfmemeimage_model.pkl")
+joblib.dump(scaler, "imagesscaler.pkl")
+
+print("Model and scaler saved!")
+
+files.download("rfmemeimage_model.pkl")
+files.download("imagesscaler.pkl")
+
+uploaded_img = files.upload()
+img_path = list(uploaded_img.keys())[0]
+
+import cv2
+import numpy as np
+
+img = cv2.imread(img_path)
+gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+brightness = np.mean(gray)
+contrast = np.std(gray)
+
+edges = cv2.Canny(gray, 100, 200)
+edge_density = np.sum(edges > 0) / edges.size
+
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+face_count = len(faces)
+
+print(brightness, contrast, edge_density, face_count)
+
+import numpy as np
+import pandas as pd
+
+rf_loaded = joblib.load("rfmemeimage_model.pkl")
+scaler_loaded = joblib.load("imagesscaler.pkl")
+
+X_new = pd.DataFrame([{
+    "brightness": brightness,
+    "contrast": contrast,
+    "edge_density": edge_density,
+    "face_count": face_count
+}])
+
+X_new_scaled = scaler_loaded.transform(X_new)
+prediction = rf_loaded.predict(X_new_scaled)[0]
+proba = rf_loaded.predict_proba(X_new_scaled)[0][1]
+
+print("🔥 VIRAL" if prediction == 1 else "😐 NOT VIRAL")
+print(f"Confidence: {proba*100:.2f}%")
+
+import imageio
+import base64
+from IPython.display import HTML, display
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------------------------------------------
+# 1. BUILD SPARSE GRAPH (much fewer edges)
+# -----------------------------------------------------------
+import networkx as nx
+from sklearn.metrics.pairwise import cosine_similarity
+
+df_small = df.sample(25, random_state=42).reset_index(drop=True)
+
+graph_features = df_small[['brightness', 'contrast', 'edge_density', 'face_count']].values
+sim = cosine_similarity(graph_features)
+
+G = nx.Graph()
+
+for i in range(len(df_small)):
+    G.add_node(i, viral=int(df_small['label'][i]))
+
+# HIGH threshold = sparse graph
+threshold = 0.94
+for i in range(len(df_small)):
+    for j in range(i+1, len(df_small)):
+        if sim[i][j] > threshold:
+            G.add_edge(i, j, weight=float(sim[i][j]))
+
+print("Nodes:", len(G.nodes), "Edges:", len(G.edges))
+
+import numpy as np
+import math
+
+def node_color(strength):
+    # strength: 0 → 1
+    # smooth gradient
+    r = min(255, int(255 * strength))
+    g = int(200 * (1-strength))
+    b = 50
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+def node_size_base(strength):
+    return 300 + int(300 * strength)
+
+def node_glow(strength):
+    # slight bright halo effect
+    return min(1.0, strength + 0.3)
+
+def simulate_diffusion(G, viral, start_node=0):
+    steps = 18 if viral == 1 else 6
+    base_prob = 0.28 if viral == 1 else 0.03
+
+    states = {n: 0 for n in G.nodes}
+    strength = {n: 0.0 for n in G.nodes}
+
+    states[start_node] = 1
+    strength[start_node] = 1.0
+
+    history = []
+
+    for step in range(steps):
+        new_states = states.copy()
+        new_strength = strength.copy()
+
+        for node in G.nodes:
+            if states[node] == 1:
+                for nbr in G[node]:
+                    prob = base_prob * G[node][nbr]['weight']
+                    if states[nbr] == 0 and np.random.rand() < prob:
+                        new_states[nbr] = 1
+                        new_strength[nbr] = min(1.0, new_strength[node]*0.8)
+
+        # smooth fade for active nodes
+        for n in new_strength:
+            if new_states[n] == 1:
+                new_strength[n] = min(1.0, new_strength[n] + 0.15)
+
+        states = new_states
+        strength = new_strength
+
+        history.append((states.copy(), strength.copy()))
+
+    return history
+
+def plot_step(G, step, frame_num):
+    states, strength = step
+
+    # rotating dynamic layout per frame
+    angle = frame_num * 0.15
+    pos = nx.spring_layout(G, k=0.6, iterations=20, seed=10)
+    pos = {n: (math.cos(angle)*x - math.sin(angle)*y,
+               math.sin(angle)*x + math.cos(angle)*y)
+           for n,(x,y) in pos.items()}
+
+    node_colors = [node_color(strength[n]) for n in G.nodes]
+    node_sizes = [node_size_base(strength[n]) for n in G.nodes]
+
+    fig, ax = plt.subplots(figsize=(6,6))
+    nx.draw_networkx_edges(G, pos, ax=ax, width=1, edge_color="#999999")
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, ax=ax)
+
+    ax.set_axis_off()
+    return fig
+
+from IPython.display import HTML, display
+import base64
+
+def generate_diffusion_gif(history, filename="diffusion.gif"):
+    frames = []
+    for i, step in enumerate(history):
+        fig = plot_step(G, step, i)
+        fig.canvas.draw()
+        frame = np.array(fig.canvas.renderer.buffer_rgba())
+        frames.append(frame)
+        plt.close(fig)
+
+    imageio.mimsave(filename, frames, duration=0.6)  # slooow animation
+
+    # Display in Colab
+    with open(filename, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    display(HTML(f'<img src="data:image/gif;base64,{b64}" width="480px">'))
+
+    return filename
+
+viral_pred = int(prediction)   # from your model
+history = simulate_diffusion(G, viral_pred)
+generate_diffusion_gif(history)
